@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Prepares a fresh orb: the Rust toolchain CI uses (stable, with clippy and rustfmt), ruff for
+# python-verifier/verifier.py, and a release build of the workspace's tests and CLI, so the first
+# `cargo testall` or `cargo leanvm` is incremental. Idempotent and fast on a warm snapshot.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+step() {
+  local name="$1"
+  shift
+  local start=$SECONDS
+  echo "==> $name"
+  "$@"
+  echo "<== $name ($((SECONDS - start))s)"
+}
+
+install_rust() {
+  if ! command -v rustup >/dev/null 2>&1 && [ ! -x "$HOME/.cargo/bin/rustup" ]; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+      sh -s -- -y --no-modify-path --profile minimal --default-toolchain none
+  fi
+  # rustup's installer cannot update this running script's environment.
+  export PATH="$HOME/.cargo/bin:$PATH"
+  rustup toolchain install stable --profile minimal --component clippy,rustfmt --no-self-update
+  rustup default stable
+  # Amp and supervised services start in login shells, which read ~/.bash_profile.
+  if ! grep -Fqx '. "$HOME/.cargo/env"' "$HOME/.bash_profile" 2>/dev/null; then
+    printf '\n. "$HOME/.cargo/env"\n' >>"$HOME/.bash_profile"
+  fi
+}
+
+install_ruff() {
+  if ! command -v ruff >/dev/null 2>&1; then
+    uv tool install ruff
+  fi
+}
+
+step "Rust toolchain" install_rust
+step "ruff" install_ruff
+# Drops a target/ restored from a snapshot made on another CPU (see .agents/resume).
+step "native CPU check" .agents/resume
+step "release test build" cargo test --release --workspace --no-run --locked
+step "release CLI build" cargo build --release -p leanvm-cli --locked

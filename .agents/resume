@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# .cargo/config.toml builds with `-C target-cpu=native`, but Cargo fingerprints only the flag, not the
+# CPU it resolves to. An orb restored on another CPU would reuse binaries that may not run there, so
+# drop the build when the host's native CPU differs from the one recorded when it was made.
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+export PATH="$HOME/.cargo/bin:$PATH"
+command -v rustc >/dev/null 2>&1 || exit 0
+
+marker=target/.native-cpu
+native="$({ rustc -C target-cpu=native --print target-cpus | grep -i 'native'; rustc -C target-cpu=native --print cfg; } | sha256sum)"
+if [ -f "$marker" ] && [ "$(cat "$marker")" != "$native" ]; then
+  echo "Native CPU changed since target/ was built; removing it"
+  rm -rf target
+fi
+mkdir -p target
+echo "$native" >"$marker"
