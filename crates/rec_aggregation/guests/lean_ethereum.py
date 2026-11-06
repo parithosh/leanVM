@@ -3651,11 +3651,13 @@ def wots_leaf(p0, p1, walks, n: Const, leaf):
 
 
 @inline
-def lx_levels(cur, pp, powers, his, out, w: Const, k: Const):
-    # The LX_WINDOW path levels from LX_WINDOW * w, whose index bits are k's, from `cur`
-    # into out. A node's order against its hinted sibling is k's bit, and a parent's
-    # address holds `leaf_index >> (level + 1)`: his[w + 1] shifted up by what is left of
-    # the window, k's higher bits added. Nothing is above the top window.
+def lx_levels(nodes, pp, powers, his, v: Const, w: Const, k: Const):
+    # The LX_WINDOW path levels from LX_WINDOW * w, whose index bits are k's, from the node
+    # at nodes[KECCAK_STATE * v] to the 13 cells after it. A node's order against its
+    # hinted sibling is k's bit, and a parent's address holds `leaf_index >> (level + 1)`:
+    # his[w + 1] shifted up by what is left of the window, k's higher bits added. Nothing
+    # is above the top window.
+    cur = nodes[KECCAK_STATE * v]
     for r in unroll(0, LX_WINDOW):
         tag = const(TW_NODE + ((LX_WINDOW * w + r) % LX_HEIGHT + 1) * HI_MUL + (LX_WINDOW * w + r) // LX_HEIGHT * LX_TOP + k // 2 ** (r + 1))
         if const(w + 1 == LX_WINDOWS):
@@ -3664,32 +3666,35 @@ def lx_levels(cur, pp, powers, his, out, w: Const, k: Const):
             at = his[w + 1] + tag
         else:
             at = his[w + 1] * powers[LX_WINDOW - 1 - r] + tag
+        sibling = hint_witness("lx_path")
         if const(r + 1 == LX_WINDOW):
-            parent = out
+            if const((k // 2 ** r) % 2 == 0):
+                keccak([pp, at], [cur, sibling], nodes[KECCAK_STATE * (v + 1):KECCAK_STATE * (v + 2)])
+            else:
+                keccak([pp, at], [sibling, cur], nodes[KECCAK_STATE * (v + 1):KECCAK_STATE * (v + 2)])
         else:
             parent = StackBuf(KECCAK_STATE)
-        sibling = hint_witness("lx_path")
-        if const((k // 2 ** r) % 2 == 0):
-            keccak([pp, at], [cur, sibling], parent)
-        else:
-            keccak([pp, at], [sibling, cur], parent)
-        cur = parent[0]
+            if const((k // 2 ** r) % 2 == 0):
+                keccak([pp, at], [cur, sibling], parent)
+            else:
+                keccak([pp, at], [sibling, cur], parent)
+            cur = parent[0]
     return
 
 
 @inline
-def lx_window(cur, pp, powers, his, out, w: Const, k: Const):
-    # Window w of the path (`lx_levels`). Returns his[w] as his[w + 1] and k spell it,
-    # which the dispatch writes where the hinted his[w] already is: so the index the
-    # signature's addresses use is the one its path takes.
-    lx_levels(cur, pp, powers, his, out, w, k)
+def lx_window(nodes, pp, powers, his, v: Const, w: Const, k: Const):
+    # Window w of the path (`lx_levels`), the layer's v-th. Returns his[w] as his[w + 1]
+    # and k spell it, which the dispatch writes where the hinted his[w] already is: so the
+    # index the signature's addresses use is the one its path takes.
+    lx_levels(nodes, pp, powers, his, v, w, k)
     return his[w + 1] * powers[LX_WINDOW] + const(k)
 
 
 @inline
-def lx_top_window(cur, pp, powers, his, out, w: Const, k: Const):
+def lx_top_window(nodes, pp, powers, his, v: Const, w: Const, k: Const):
     # The top window, nothing above it: his[w] is k alone.
-    lx_levels(cur, pp, powers, his, out, w, k)
+    lx_levels(nodes, pp, powers, his, v, w, k)
     return const(k)
 
 
@@ -3780,20 +3785,19 @@ def verify_lean_xmss(signer):
         # blocks read the cells of `lx_leaf`, which the walks pinned to their tips.
         walks[LX_LEAF_READ] = pp
         walks[LX_LEAF_READ + 1] = idx + lxc[LXC_LEAF]
-        leaf = StackBuf(KECCAK_STATE)
-        keccak_cells([absorbed(walks[LX_LEAF_READ + 9 * (2 * j // 17) + j - 17 * (2 * j // 17) // 2], walks[LX_LEAF_READ + 9 * (2 * j // 17) + 9]) for j in unroll(0, LX_V + 2)], leaf, states=walks[LX_LEAF_STATES:LX_WALKS])
-        cur = leaf[0]
+        # The leaf and the node each window reaches, 13 cells apart; the windows' dispatches
+        # back to back.
+        nodes = StackBuf(KECCAK_STATE * (LX_LAYER_WINDOWS + 1))
+        keccak_cells([absorbed(walks[LX_LEAF_READ + 9 * (2 * j // 17) + j - 17 * (2 * j // 17) // 2], walks[LX_LEAF_READ + 9 * (2 * j // 17) + 9]) for j in unroll(0, LX_V + 2)], nodes[0:KECCAK_STATE], states=walks[LX_LEAF_STATES:LX_WALKS])
+        window_bound = lxc[LXC_WINDOW_BOUND]
         for v in unroll(0, LX_LAYER_WINDOWS):
-            w = layer * LX_LAYER_WINDOWS + v
-            out = StackBuf(KECCAK_STATE)
-            window_bound = lxc[LXC_WINDOW_BOUND]
-            assert log(windows[w]) < log(window_bound * GEN)
-            if const(w + 1 == LX_WINDOWS):
-                his[w] = match(log(windows[w]), range(0, LX_WINDOW_ARMS), lambda k: lx_top_window(cur, pp, powers, his, out, w, k))
+            assert log(windows[layer * LX_LAYER_WINDOWS + v]) < log(window_bound * GEN)
+        for v in unroll(0, LX_LAYER_WINDOWS):
+            if const(layer * LX_LAYER_WINDOWS + v + 1 == LX_WINDOWS):
+                his[layer * LX_LAYER_WINDOWS + v] = match(log(windows[layer * LX_LAYER_WINDOWS + v]), range(0, LX_WINDOW_ARMS), lambda k: lx_top_window(nodes, pp, powers, his, v, layer * LX_LAYER_WINDOWS + v, k))
             else:
-                his[w] = match(log(windows[w]), range(0, LX_WINDOW_ARMS), lambda k: lx_window(cur, pp, powers, his, out, w, k))
-            cur = out[0]
-        root = cur
+                his[layer * LX_LAYER_WINDOWS + v] = match(log(windows[layer * LX_LAYER_WINDOWS + v]), range(0, LX_WINDOW_ARMS), lambda k: lx_window(nodes, pp, powers, his, v, layer * LX_LAYER_WINDOWS + v, k))
+        root = nodes[KECCAK_STATE * LX_LAYER_WINDOWS]
     assert root == signer[1]
     return
 
