@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Prepares a fresh orb: the Rust toolchain CI uses (stable, with clippy and rustfmt), ruff for
-# python-verifier/verifier.py, and a release build of the workspace's tests and CLI, so the first
-# `cargo testall` or `cargo leanvm` is incremental. Idempotent and fast on a warm snapshot.
+# Prepares a fresh orb: the Rust toolchain CI uses (stable, with clippy and rustfmt), ruff and
+# Python 3.13 for python-verifier/verifier.py, Lean with Mathlib's cache for formal/, and a
+# release build of the workspace's tests and CLI, so the first `cargo testall` or `cargo leanvm`
+# is incremental. Idempotent and fast on a warm snapshot.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -37,8 +38,49 @@ install_ruff() {
   fi
 }
 
+# python-verifier/verifier.py needs Python 3.12 or later, and the verifier tests run
+# `python3`; ~/.local/bin, where uv puts its default, comes first on PATH.
+install_python() {
+  uv python install 3.13 --default --preview
+}
+
+# elan and the toolchain both proofs pin, then Mathlib's build cache. The two projects
+# pin the same dependencies, so they share one checkout of them (see their manifests).
+install_lean() {
+  if [ ! -x "$HOME/.elan/bin/elan" ]; then
+    curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh |
+      sh -s -- -y --default-toolchain none --no-modify-path
+  fi
+  export PATH="$HOME/.elan/bin:$PATH"
+  if ! grep -Fqx '. "$HOME/.elan/env"' "$HOME/.bash_profile" 2>/dev/null; then
+    printf '\n. "$HOME/.elan/env"\n' >>"$HOME/.bash_profile"
+  fi
+  local xmss=formal/lean_xmss sphincs=formal/lean_sphincs
+  # `cache get` rereads every cached file to check it, which takes minutes on a cold disk, so
+  # it is skipped while the toolchains and manifests it fetched for are unchanged.
+  local marker=$sphincs/.lake/packages/.mathlib-cache
+  local fingerprint
+  fingerprint="$(cat "$xmss/lean-toolchain" "$xmss/lake-manifest.json" "$sphincs/lean-toolchain" "$sphincs/lake-manifest.json" | sha256sum)"
+  if [ "$(cat "$marker" 2>/dev/null)" = "$fingerprint" ] && [ -e "$xmss/.lake/packages" ]; then
+    echo "Mathlib cache already fetched for these manifests"
+    return
+  fi
+  if cmp -s "$xmss/lean-toolchain" "$sphincs/lean-toolchain" &&
+    [ "$(jq -S .packages "$xmss/lake-manifest.json")" = "$(jq -S .packages "$sphincs/lake-manifest.json")" ]; then
+    mkdir -p "$xmss/.lake" "$sphincs/.lake/packages"
+    [ -e "$xmss/.lake/packages" ] || ln -s ../../lean_sphincs/.lake/packages "$xmss/.lake/packages"
+    (cd "$sphincs" && lake exe cache get)
+  else
+    (cd "$xmss" && lake exe cache get)
+    (cd "$sphincs" && lake exe cache get)
+  fi
+  echo "$fingerprint" >"$marker"
+}
+
 step "Rust toolchain" install_rust
 step "ruff" install_ruff
+step "Python" install_python
+step "Lean and Mathlib cache" install_lean
 # Drops a target/ restored from a snapshot made on another CPU (see .agents/resume).
 step "native CPU check" .agents/resume
 step "release test build" cargo test --release --workspace --no-run --locked
