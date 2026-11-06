@@ -91,8 +91,8 @@ fn digit_hints(codeword: &[u8], size: usize) -> impl Iterator<Item = Vec<F192>> 
 }
 
 /// The guest's `lx_constants` with the bottom digest's randomizer `rho`: `GEN ** s` for
-/// every digit sum of a group, the chain indices neither zero nor a power of two, the
-/// message, leaf and top-layer address cells, a chain step's at each position, the target
+/// every digit sum of a group, the chain indices neither zero nor a power of two, each
+/// layer's message and leaf address cells and a chain step's at each position, the target
 /// sum and the bounds of the digit groups, the last group and the path windows in the
 /// exponent, then from `LXC_RHO` (the next cell whose place in a hashed block is not in
 /// its tail) the rest of that digest's block after its 64 bytes: `rho`, its padding's
@@ -106,11 +106,14 @@ pub(super) fn lean_xmss_constants(rho: F192) -> (Vec<F192>, usize) {
             .filter(|i| !i.is_power_of_two())
             .map(|i| F192::new(i as u64, 0, 0)),
     );
-    cells.push(address(lean_xmss::tweak(lean_xmss::TWEAK_MSG, 0, 0)));
-    cells.push(address(lean_xmss::tweak(lean_xmss::TWEAK_LEAF, 0, 0)));
-    cells.push(address(lean_xmss::tweak(0, lean_xmss::TOP, 0)));
-    cells
-        .extend((0..lean_xmss::CHAIN_LEN - 1).map(|s| address(lean_xmss::tweak(lean_xmss::TWEAK_CHAIN, 0, 0).step(s))));
+    for layer in 0..2 {
+        let hi = lean_xmss::layer_hi(layer, 0);
+        cells.push(address(lean_xmss::tweak(lean_xmss::TWEAK_MSG, hi, 0)));
+        cells.push(address(lean_xmss::tweak(lean_xmss::TWEAK_LEAF, hi, 0)));
+        cells.extend(
+            (0..lean_xmss::CHAIN_LEN - 1).map(|s| address(lean_xmss::tweak(lean_xmss::TWEAK_CHAIN, hi, 0).step(s))),
+        );
+    }
     cells.push(count(lean_xmss::TARGET_SUM));
     cells.push(count(lean_xmss::CHAIN_LEN.pow(LX_DIGIT_GROUP as u32) - 1));
     cells.push(count(

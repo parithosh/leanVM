@@ -439,17 +439,19 @@ LX_TAG_SLOT = LX_TAG_SLOT_PLACEHOLDER
 LX_TAG_LOG = LX_TAG_LOG_PLACEHOLDER
 LX_N_TAGS = LX_N_TAGS_PLACEHOLDER
 # The cells a leanXMSS verification reads but no signature sets (`lx_constants`): the
-# powers GEN ** s, the carried chain indices, then the address types, the target sum
-# and the range checks' bounds. At LXC_RHO, a block's m operands' place in the hash, the
+# powers GEN ** s, the carried chain indices, then each layer's message, leaf and chain
+# step address types, the top's with its flag, the target sum and the range checks'
+# bounds. At LXC_RHO, a block's m operands' place in the hash, the
 # bottom digest's randomizer, the one cell no hash covers and a signature sets, then the
 # rest of that digest's block, its padding and capacity. Zero to whole 8-cell blocks of
 # the cells but the randomizer, which hash to LXC_DIGEST.
 LXC_TAGS = LX_DIGIT_GROUP * CHAIN_STEPS + 1
-LXC_MSG = LXC_TAGS + LX_N_TAGS
-LXC_LEAF = LXC_MSG + 1
-LXC_TOP = LXC_MSG + 2
-LXC_CHAIN = LXC_MSG + 3  # CHAIN_STEPS cells, one a step
-LXC_TARGET = LXC_CHAIN + CHAIN_STEPS
+LXC_ADDRS = LXC_TAGS + LX_N_TAGS  # LXC_ADDR_CELLS a layer, from these offsets
+LXC_MSG = 0
+LXC_LEAF = 1
+LXC_CHAIN = 2  # CHAIN_STEPS cells, one a step
+LXC_ADDR_CELLS = 2 + CHAIN_STEPS
+LXC_TARGET = LXC_ADDRS + 2 * LXC_ADDR_CELLS
 LXC_DIGIT_BOUND = LXC_TARGET + 1
 LXC_TAIL_BOUND = LXC_TARGET + 2
 LXC_WINDOW_BOUND = LXC_TARGET + 3
@@ -3756,18 +3758,17 @@ def verify_lean_xmss(signer):
     pin_lx_constants(lxc)
     powers = lxc
     for layer in unroll(0, 2):
-        if const(layer == 0):
-            idx = his[0]
-        else:
-            idx = his[LX_LAYER_WINDOWS] + lxc[LXC_TOP]
+        # The layer's index. Its address types, at LXC_ADDRS + LXC_ADDR_CELLS * layer,
+        # carry its flag.
+        idx = his[LX_LAYER_WINDOWS * layer]
         # D = Th(P, A, M | R), one block: 80 bytes at the bottom, R and its padding read
         # off `lx_constants` as a whole block, and 64 at the top, where M is the bottom root.
         digest = StackBuf(KECCAK_STATE)
         if const(layer == 0):
-            keccak([pp, idx + lxc[LXC_MSG]], [signer[GEN ** 2], signer[GEN ** 3]], digest, tail=lxc[LXC_RHO:LXC_RHO + 4], cap=lxc[LXC_RHO + 4:LXC_RHO + 9])
+            keccak([pp, idx + lxc[LXC_ADDRS + LXC_ADDR_CELLS * layer + LXC_MSG]], [signer[GEN ** 2], signer[GEN ** 3]], digest, tail=lxc[LXC_RHO:LXC_RHO + 4], cap=lxc[LXC_RHO + 4:LXC_RHO + 9])
         else:
             rho = hint_witness("randomizer")
-            keccak([pp, idx + lxc[LXC_MSG]], [root, rho], digest)
+            keccak([pp, idx + lxc[LXC_ADDRS + LXC_ADDR_CELLS * layer + LXC_MSG]], [root, rho], digest)
 
         # The codeword: LX_DIGIT_GROUP digits at a time, hinted in the exponent, range
         # checked and dispatched once, the arm walking every chain's remaining steps
@@ -3776,7 +3777,7 @@ def verify_lean_xmss(signer):
         # also checks the digits past LX_V are zero.
         steps = StackBuf(CHAIN_STEPS)
         for st in unroll(0, CHAIN_STEPS):
-            steps[st] = idx + lxc[LXC_CHAIN + st]
+            steps[st] = idx + lxc[LXC_ADDRS + LXC_ADDR_CELLS * layer + LXC_CHAIN + st]
         if const(layer == 0):
             walks = bottom_walks
         else:
@@ -3803,7 +3804,7 @@ def verify_lean_xmss(signer):
 
         # The one-time leaf, then the path to the layer's root, a window at a time. Its
         # blocks read the cells of `lx_leaf`, which the walks pinned to their tips.
-        walks[LX_LEAF_READ + 1] = idx + lxc[LXC_LEAF]
+        walks[LX_LEAF_READ + 1] = idx + lxc[LXC_ADDRS + LXC_ADDR_CELLS * layer + LXC_LEAF]
         # The leaf and the node each window reaches, 13 cells apart; the windows' dispatches
         # back to back.
         nodes = StackBuf(KECCAK_STATE * (LX_LAYER_WINDOWS + 1))
