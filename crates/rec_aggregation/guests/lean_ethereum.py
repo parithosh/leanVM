@@ -3629,6 +3629,14 @@ def walk_group(at, pp, walks, tags, first: Const, n: Const, k: Const, lx: Const,
 
 
 @inline
+def walk_first_group(at, pp, walks, tags, n: Const, k: Const, lx: Const, powers):
+    # `walk_group` from chain 0, whose folds are its own digits' sum and digits.
+    for r in unroll(0, n):
+        walk(at, pp, walks, tags, powers, r, (k // CHAIN_LENGTH ** r) % CHAIN_LENGTH, lx)
+    return powers[DIGIT_SUMS[k % CHAIN_LENGTH ** n]], const(k % CHAIN_LENGTH ** n)
+
+
+@inline
 def leaf_word(p0, p1, walks, j: Const):
     # Word j of a one-time leaf's input: the prefix (p0, p1), then the chain tips.
     w = p0
@@ -3762,8 +3770,6 @@ def verify_lean_xmss(signer):
         for st in unroll(0, CHAIN_STEPS):
             steps[st] = idx + lxc[LXC_CHAIN + st]
         walks = StackBuf(LX_WALKS)
-        digit_product = 1
-        encoded = 0
         hint_witness(walks[LX_LEAF_READ + 2:LX_LEAF_STATES], "lx_leaf")
         groups = StackBuf(LX_DIGIT_DISPATCHES)
         hint_witness(groups, "lx_digits")
@@ -3776,7 +3782,9 @@ def verify_lean_xmss(signer):
         # wide as the others, its range check what keeps it to LX_DIGIT_TAIL digits, and its
         # arms store the product where the target is and the digits where D already is.
         for p in unroll(0, LX_DIGIT_DISPATCHES):
-            if const(p + 1 == LX_DIGIT_DISPATCHES):
+            if const(p == 0):
+                digit_product, encoded = match(log(groups[p]), range(0, LX_DIGIT_GROUPS), lambda k: walk_first_group(steps, pp, walks, lxc, LX_GROUP_SIZES[p], k, 1, powers))
+            elif const(p + 1 == LX_DIGIT_DISPATCHES):
                 lxc[LXC_TARGET], digest[0] = match(log(groups[p]), range(0, LX_DIGIT_GROUPS), lambda k: walk_group(steps, pp, walks, lxc, LX_DIGIT_GROUP * p, LX_GROUP_SIZES[p], k, 1, powers, digit_product, encoded))
             else:
                 digit_product, encoded = match(log(groups[p]), range(0, LX_DIGIT_GROUPS), lambda k: walk_group(steps, pp, walks, lxc, LX_DIGIT_GROUP * p, LX_GROUP_SIZES[p], k, 1, powers, digit_product, encoded))
