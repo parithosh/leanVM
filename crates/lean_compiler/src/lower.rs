@@ -1396,6 +1396,7 @@ impl FnLower<'_> {
                 let stmts: Vec<Stmt> = (lo..hi)
                     .flat_map(|j| subst_stmts(body, var, &Expr::Lit(j as u128)))
                     .collect();
+                let stmts = self.decide_literal_ifs(stmts);
                 for (i, s) in stmts.iter().enumerate() {
                     // Back-to-back dispatches chain: each arm of one enters the next.
                     if let (StmtKind::Match { targets, arms, .. }, Some(next)) = (&s.kind, stmts.get(i + 1))
@@ -1410,6 +1411,36 @@ impl FnLower<'_> {
                 }
             }
         }
+    }
+
+    /// Each `if const(...)` whose condition names nothing, so reads the same wherever it is
+    /// lowered, replaced by its taken arm's statements, as [`Self::lower_if`] would run them:
+    /// a dispatch inside one then chains with its neighbours in an `unroll`.
+    fn decide_literal_ifs(&self, stmts: Vec<Stmt>) -> Vec<Stmt> {
+        stmts
+            .into_iter()
+            .flat_map(|s| {
+                if let StmtKind::If {
+                    eq,
+                    lhs,
+                    rhs,
+                    then,
+                    els,
+                    force_const: true,
+                } = &s.kind
+                {
+                    let mut names = Vec::new();
+                    crate::ast::free_vars_expr(lhs, &mut names);
+                    crate::ast::free_vars_expr(rhs, &mut names);
+                    if names.is_empty()
+                        && let (Some(a), Some(b)) = (self.try_const_int(lhs), self.try_const_int(rhs))
+                    {
+                        return self.decide_literal_ifs(if (a == b) == *eq { then.clone() } else { els.clone() });
+                    }
+                }
+                vec![s]
+            })
+            .collect()
     }
 
     /// `for i in mul_range(GEN**lo, GEN**hi)` → a single tail-recursive helper, with the

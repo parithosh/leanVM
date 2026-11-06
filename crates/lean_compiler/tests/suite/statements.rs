@@ -1041,7 +1041,8 @@ def main():
 
 /// Back-to-back `match` statements an `unroll` expands chain, each arm entering the
 /// next dispatch: the arms still run in order and fold into the same value, in fewer
-/// cycles than the same matches written out, which do not chain.
+/// cycles than the same matches written out, which do not chain. An `if const(...)` the
+/// `unroll` decides between them keeps them back to back.
 #[test]
 fn chained_matches_run_in_order() {
     let head = "@inline\ndef add(acc, k: Const):\n    return acc * GEN ** (k + 1)\n\ndef main():\n    xs = StackBuf(3)\n    xs[0] = GEN ** 1\n    xs[1] = GEN ** 3\n    xs[2] = GEN ** 0\n    acc = GEN\n";
@@ -1060,6 +1061,15 @@ fn chained_matches_run_in_order() {
     assert!(program.execute([F192::from(g_pow(10)), F192::ZERO]).is_err());
     let unchained = compile(&parse(&unchained).expect("parse"));
     assert!(program.execute(want).unwrap().cycles < unchained.execute(want).unwrap().cycles);
+    let arm = step(0).replace("[0]", "[p]").replace("** 0", "** p");
+    let split = format!(
+        "{head}    for p in unroll(0, 3):\n        if const(p == 2):\n            {arm}        else:\n            {arm}{tail}"
+    );
+    let split = compile(&parse(&split).expect("parse"));
+    assert_eq!(
+        split.execute(want).unwrap().cycles,
+        program.execute(want).unwrap().cycles
+    );
 }
 
 /// A scrutinee chains only when reading it emits nothing and the previous match does not
