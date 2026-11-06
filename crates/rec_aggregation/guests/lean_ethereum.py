@@ -4585,6 +4585,8 @@ def main():
     byte_bits = HeapBuf(SP_BYTE_VALUES)
     for v in unroll(0, SP_BYTE_VALUES):
         byte_bits[GEN ** v] = v
+    # The bound's last index, so the loop range checks against it with no `g^{-1}`.
+    lx_last = lx_slots_g / GEN
     for xi in mul_range(1, n_raw_x_g):
         idx = hint_witness("raw_index")
         # A runtime bound, whose `n_total < 2^MIN_LOG_MEM` precondition is
@@ -4592,7 +4594,7 @@ def main():
         # degenerates to what DEREF alone gives and an index could reach past
         # `cover`, which is the whole bijection. The bound is the leanXMSS region, so
         # a raw leanXMSS signature covers no leanSPHINCS claim.
-        assert log(idx) < log(lx_slots_g)
+        assert log(idx) < log(lx_last * GEN)
         cover[idx] = xi
         verify_lean_xmss(lx_table * (idx ** 4))
     for xj in mul_range(1, n_raw_s_g):
