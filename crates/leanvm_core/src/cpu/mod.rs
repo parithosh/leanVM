@@ -101,6 +101,9 @@ pub struct Program {
     /// to match `prog`: always set by [`Program::assemble`] from the bytecode,
     /// so a `Program` cannot carry an IV inconsistent with its own `prog`.
     pub(crate) fiat_shamir_iv: [u8; 32],
+    /// The public bytecode columns, computed once at assembly with the IV: every layout of the
+    /// program shares them, as a proof's and each of a recursion node's children's do.
+    bytecode_columns: layout::BytecodeColumns,
     /// Prover-side frame/buffer allocation hints (keyed by global pc) and the
     /// size of `main`'s frame: the nondeterminism [`Program::execute`] needs to
     /// run the program. Public verification ([`verify`]) ignores them.
@@ -142,8 +145,9 @@ impl Program {
     /// from `prog`. The single funnel for construction, so the digest is always
     /// consistent with the bytecode.
     pub fn assemble(prog: Vec<Op>, hints: HashMap<u32, Vec<hints::RHint>>, main_frame: u32) -> Self {
+        let bytecode_columns = layout::bytecode_columns(&prog);
         let fiat_shamir_iv = {
-            let table = layout::bytecode_table(&prog);
+            let table = layout::stack_columns(&bytecode_columns);
             // SAFETY: F64 is #[repr(transparent)] over u64, so the slice's byte image is
             // exactly the concatenation of its `to_le_bytes` on little-endian targets.
             let bytes: &[u8] =
@@ -156,6 +160,7 @@ impl Program {
         Self {
             prog,
             fiat_shamir_iv,
+            bytecode_columns,
             hints,
             main_frame,
             witness: HashMap::new(),
@@ -163,6 +168,11 @@ impl Program {
             src_lines: Vec::new(),
             min_log_committed: 0,
         }
+    }
+
+    /// The [`layout()`] of this program.
+    pub fn layout(&self, log_mem: usize, rows: [usize; tables::N_TABLES], pi: [F192; 2]) -> Layout {
+        layout::layout_of(self.bytecode_columns.clone(), log_mem, rows, pi)
     }
 
     /// Where `pc` came from: `"verify_sub (line 2204)"` when the compiler left a
@@ -187,7 +197,7 @@ impl Program {
 
     /// The compiled function containing `pc`. [`Self::site_at`] wraps this with
     /// the source line when one is known.
-    pub fn fn_at(&self, pc: u32) -> &str {
+    pub(crate) fn fn_at(&self, pc: u32) -> &str {
         self.fn_ranges
             .iter()
             .find(|(_, entry, len)| pc >= *entry && pc < *entry + *len)
@@ -436,6 +446,8 @@ pub fn prove(program: &Program, public_input: [F192; 2], log_inv_rate: usize) ->
     }
     let cycles = exec.cycles;
     let mut w = crate::stage!("Build witness", || program.build(&exec, keccak_blocks));
+    let mem_used = exec.mem_used;
+    drop(exec);
     if !(pcs::MIN_MU..=pcs::MAX_MU).contains(&w.layout.shape.mu) {
         return Err(ProveError::WitnessOutOfRange {
             log_committed: w.layout.shape.mu,
@@ -500,8 +512,8 @@ pub fn prove(program: &Program, public_input: [F192; 2], log_inv_rate: usize) ->
     let mut slots = finish_claims(l, bus.claims, &table_claims, r_pi);
     let output = keccak_output_claim(&table_claims);
 
-    // Run the Keccak reduction over the witness retained from the q_keccak build
-    // pass; it returns two claims on the committed `q_keccak`, discharged by the
+    // Run the Keccak reduction over the witness rebuilt from q_keccak's input
+    // states; it returns two claims on the committed `q_keccak`, discharged by the
     // PCS below in the SAME WHIR as every leanVM point claim: one ring-switched,
     // one appended to the point claims.
     let keccak_reduction = w.keccak_reduction;
@@ -510,7 +522,6 @@ pub fn prove(program: &Program, public_input: [F192; 2], log_inv_rate: usize) ->
     let openings = crate::stage!("Keccak reduction", || {
         keccak_reduction.prove(&mut ps, q_keccak, &output)
     });
-    drop(keccak_reduction);
     let (ring, outputs) = openings.into_pcs_claims(offset);
     slots.extend(outputs);
     crate::stage!("PCS open", || { pcs::open(&mut ps, committed, w.q, &slots, &ring) });
@@ -521,7 +532,7 @@ pub fn prove(program: &Program, public_input: [F192; 2], log_inv_rate: usize) ->
             rows: w.layout.rows,
             committed: committed_size,
             log_mem: w.log_mem,
-            mem_used: exec.mem_used,
+            mem_used,
             bytecode: program.code_len(),
         },
     ))
