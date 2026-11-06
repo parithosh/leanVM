@@ -3768,11 +3768,13 @@ def verify_lean_xmss(signer):
             assert log(groups[p]) < log(digit_bound * GEN)
         assert log(groups[LX_DIGIT_DISPATCHES - 1]) < log(tail_bound * GEN)
         # Back to back, each arm entering the next dispatch. The last group's table is as
-        # wide as the others, its range check what keeps it to LX_DIGIT_TAIL digits.
+        # wide as the others, its range check what keeps it to LX_DIGIT_TAIL digits, and its
+        # arms store the product where the target is and the digits where D already is.
         for p in unroll(0, LX_DIGIT_DISPATCHES):
-            digit_product, encoded = match(log(groups[p]), range(0, LX_DIGIT_GROUPS), lambda k: walk_group(steps, pp, walks, lxc, LX_DIGIT_GROUP * p, LX_GROUP_SIZES[p], k, 1, powers, digit_product, encoded))
-        digest[0] = encoded  # the digits, stored where D already is
-        assert digit_product == lxc[LXC_TARGET]
+            if const(p + 1 == LX_DIGIT_DISPATCHES):
+                lxc[LXC_TARGET], digest[0] = match(log(groups[p]), range(0, LX_DIGIT_GROUPS), lambda k: walk_group(steps, pp, walks, lxc, LX_DIGIT_GROUP * p, LX_GROUP_SIZES[p], k, 1, powers, digit_product, encoded))
+            else:
+                digit_product, encoded = match(log(groups[p]), range(0, LX_DIGIT_GROUPS), lambda k: walk_group(steps, pp, walks, lxc, LX_DIGIT_GROUP * p, LX_GROUP_SIZES[p], k, 1, powers, digit_product, encoded))
 
         # The one-time leaf, then the path to the layer's root, a window at a time. Its
         # blocks read the cells of `lx_leaf`, which the walks pinned to their tips.
