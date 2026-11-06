@@ -3727,8 +3727,11 @@ def pin_lx_constants(lxc):
 def verify_lean_xmss(signer):
     # `signer` is one 4-cell entry of the leanXMSS coverage table: the pubkey's
     # merkle root and public parameter, then the message that pubkey signed. The
-    # bottom layer signs the message, the top layer the bottom root.
-    pp = signer[GEN]
+    # bottom layer signs the message, the top layer the bottom root. The public parameter
+    # is loaded where the bottom leaf's hash reads it.
+    bottom_walks = StackBuf(LX_WALKS)
+    bottom_walks[LX_LEAF_READ] = signer[GEN]
+    pp = bottom_walks[LX_LEAF_READ]
 
     # The leaf index rides the signature, so every address is derived here from it. It
     # is advice: his[v] is `leaf_index >> (LX_WINDOW * v)`, a field's value, and each window
@@ -3769,7 +3772,11 @@ def verify_lean_xmss(signer):
         steps = StackBuf(CHAIN_STEPS)
         for st in unroll(0, CHAIN_STEPS):
             steps[st] = idx + lxc[LXC_CHAIN + st]
-        walks = StackBuf(LX_WALKS)
+        if const(layer == 0):
+            walks = bottom_walks
+        else:
+            walks = StackBuf(LX_WALKS)
+            walks[LX_LEAF_READ] = pp
         hint_witness(walks[LX_LEAF_READ + 2:LX_LEAF_STATES], "lx_leaf")
         groups = StackBuf(LX_DIGIT_DISPATCHES)
         hint_witness(groups, "lx_digits")
@@ -3791,7 +3798,6 @@ def verify_lean_xmss(signer):
 
         # The one-time leaf, then the path to the layer's root, a window at a time. Its
         # blocks read the cells of `lx_leaf`, which the walks pinned to their tips.
-        walks[LX_LEAF_READ] = pp
         walks[LX_LEAF_READ + 1] = idx + lxc[LXC_LEAF]
         # The leaf and the node each window reaches, 13 cells apart; the windows' dispatches
         # back to back.
