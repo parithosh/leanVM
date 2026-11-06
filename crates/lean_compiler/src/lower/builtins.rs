@@ -36,6 +36,9 @@ impl FnLower<'_> {
         if let Some(tail) = kwargs.get("tail") {
             cells.extend(self.keccak_operand(tail, 4));
         }
+        if cells.iter().any(|c| matches!(c, SpongeCell::Absorbed(..))) {
+            self.fail("absorbed(...) is a word of a keccak_cells message, absorbed after its first block")
+        }
         if let Some(cap) = kwargs.get("cap") {
             if kwargs.contains_key("len") {
                 self.fail("keccak cap= is an overwrite duplex step: it takes no len=")
@@ -62,7 +65,7 @@ impl FnLower<'_> {
         }
         let len = self.keccak_len(&kwargs, cells.len() as u32);
         let out = self.keccak_out(&args[2]);
-        self.emit_keccak_message(cells, Some(len), None, out.state);
+        self.emit_keccak_message(cells, Some(len), None, out.state, None);
         self.keccak_finish(out);
     }
 
@@ -76,8 +79,20 @@ impl FnLower<'_> {
     /// number of block pairs, 272 bytes or 17 cells each, so that the cells start a block at
     /// a cell boundary. `final=0` absorbs the cells zero-extended to whole blocks, with no
     /// padding: the start of a hash continued later, or a bare permutation.
+    ///
+    /// `states=`, a stack run of 13 cells a block but the last, receives every block's output
+    /// but the last's, block `k`'s from cell `13k`. A word of a list may be `absorbed(x)`: `x`
+    /// is the cell the block's `KECCAK` reads in its place, the previous output's cell XOR the
+    /// word, which the program provides, or the word itself in a first block from the zero
+    /// state. A word an even block ends in and the next begins with is `absorbed(x, y)`, `y`
+    /// what the second block reads.
     fn lower_keccak_cells(&mut self, args: &[Expr]) {
-        let kwargs = self.keccak_kwargs(args, "keccak_cells", &["cells", "out"], &["state", "len", "final"]);
+        let kwargs = self.keccak_kwargs(
+            args,
+            "keccak_cells",
+            &["cells", "out"],
+            &["state", "len", "final", "states"],
+        );
         let comprehension;
         let list = match &args[0] {
             Expr::ListComp(body, var, lo, hi) => {
@@ -124,8 +139,17 @@ impl FnLower<'_> {
                 ))
             })
         });
+        let blocks = keccak_blocks(cells.len(), final_len);
+        let states = kwargs.get("states").map(|e| match self.cell_run(e) {
+            CellRun::Stack { base, len } if len as usize == STATE_CELLS as usize * (blocks - 1) => base,
+            _ => self.fail(format!(
+                "keccak_cells states= must be a stack run of {} cells, {STATE_CELLS} for each of the {} blocks but the last",
+                STATE_CELLS as usize * (blocks - 1),
+                blocks
+            )),
+        });
         let out = self.keccak_out(&args[1]);
-        self.emit_keccak_message(cells, final_len, state, out.state);
+        self.emit_keccak_message(cells, final_len, state, out.state, states);
         self.keccak_finish(out);
     }
 
@@ -222,19 +246,18 @@ impl FnLower<'_> {
     }
 
     /// Emit the `KECCAK` blocks absorbing `cells` into `state` (the zero state if `None`), the
-    /// last writing the 13-cell run `out`. With `final_len` the message is the cells' first
-    /// `final_len` bytes, padded; without, the cells zero-extended to whole blocks.
+    /// last writing the 13-cell run `out` and the others the runs from `states` if given. With
+    /// `final_len` the message is the cells' first `final_len` bytes, padded; without, the
+    /// cells zero-extended to whole blocks.
     fn emit_keccak_message(
         &mut self,
         mut cells: Vec<SpongeCell>,
         final_len: Option<u32>,
         state: Option<Off>,
         out: Off,
+        states: Option<Off>,
     ) {
-        let blocks = match final_len {
-            Some(len) => len as usize / RATE + 1,
-            None => (16 * cells.len()).div_ceil(RATE),
-        };
+        let blocks = keccak_blocks(cells.len(), final_len);
         // Block `k` reads the nine cells from `17k / 2`.
         let read = 17 * (blocks - 1) / 2 + BLOCK_CELLS as usize;
         if cells.len() < read {
@@ -257,9 +280,25 @@ impl FnLower<'_> {
         let mut state = state;
         for k in 0..blocks {
             let last = k + 1 == blocks;
-            let c = if last { out } else { self.alloc_stack(STATE_CELLS) };
-            let block = &cells[17 * k / 2..][..BLOCK_CELLS as usize];
-            let (m, tail) = self.keccak_rate(block, state);
+            let c = match (last, states) {
+                (true, _) => out,
+                (false, Some(s)) => s + STATE_CELLS * k as u32,
+                (false, None) => self.alloc_stack(STATE_CELLS),
+            };
+            // An odd block begins with the high half of the cell the even block before ends in.
+            let mut block = cells[17 * k / 2..][..BLOCK_CELLS as usize].to_vec();
+            if k % 2 == 1
+                && let SpongeCell::Absorbed(_, second) = block[0]
+            {
+                let y = second.unwrap_or_else(|| {
+                    self.fail(format!(
+                        "an absorbed word ends keccak block {} and begins block {k}: absorbed(x, y) names both cells",
+                        k - 1
+                    ))
+                });
+                block[0] = SpongeCell::Absorbed(y, None);
+            }
+            let (m, tail) = self.keccak_rate(&block, state);
             let b8 = match state {
                 None => self.sponge_cell(block[8]),
                 Some(st) => self.sponge_xor(st + 8, block[8], None),
@@ -295,6 +334,9 @@ impl FnLower<'_> {
                 self.emit(LOp::Xor { a: o, b: k, c: dst });
                 SpongeCell::Cell(dst)
             }
+            SpongeCell::Absorbed(..) => self.fail(format!(
+                "the keccak padding's byte {at} lands in an absorbed word, which the program must provide padded"
+            )),
         };
     }
 
@@ -311,6 +353,11 @@ impl FnLower<'_> {
         if block[4..8].iter().all(|c| matches!(c, SpongeCell::Zero)) {
             return (m, st + 4);
         }
+        if let SpongeCell::Absorbed(base, _) = block[4]
+            && (1..4).all(|j| matches!(block[4 + j], SpongeCell::Absorbed(o, _) if o == base + j as u32))
+        {
+            return (m, base);
+        }
         let tail = self.alloc_stack(4);
         for j in 0..4 {
             self.sponge_xor(st + 4 + j, block[4 + j as usize], Some(tail + j));
@@ -321,6 +368,15 @@ impl FnLower<'_> {
     /// `state ⊕ c`, into `dst` if given: a zero `c` is the state cell itself (or a copy of it
     /// into `dst`).
     fn sponge_xor(&mut self, state: Off, c: SpongeCell, dst: Option<Off>) -> Off {
+        if let SpongeCell::Absorbed(o, _) = c {
+            return match dst {
+                Some(d) => {
+                    self.copy(o, d);
+                    d
+                }
+                None => o,
+            };
+        }
         let other = match c {
             SpongeCell::Zero => {
                 return match dst {
@@ -346,7 +402,7 @@ impl FnLower<'_> {
     /// padding run, or a fresh copy.
     fn sponge_run(&mut self, cells: &[SpongeCell]) -> Off {
         let at = |k: usize| match cells[k] {
-            SpongeCell::Cell(o) => o.checked_sub(k as u32),
+            SpongeCell::Cell(o) | SpongeCell::Absorbed(o, _) => o.checked_sub(k as u32),
             _ => None,
         };
         if let Some(base) = at(0)
@@ -367,7 +423,7 @@ impl FnLower<'_> {
             match c {
                 SpongeCell::Zero => self.set_const(dst, F192::ZERO),
                 SpongeCell::Const(v) => self.set_const(dst, v),
-                SpongeCell::Cell(o) => self.copy(o, dst),
+                SpongeCell::Cell(o) | SpongeCell::Absorbed(o, _) => self.copy(o, dst),
             }
         }
         t
@@ -527,9 +583,18 @@ impl FnLower<'_> {
         if let Expr::ListLit(words) = e {
             return words
                 .iter()
-                .map(|w| match self.try_const_int(w) {
-                    Some(0) => SpongeCell::Zero,
-                    _ => SpongeCell::Cell(self.expr(w)),
+                .map(|w| match w {
+                    Expr::Call(f, args) if f == "absorbed" => {
+                        if !(1..=2).contains(&args.len()) {
+                            self.fail("absorbed takes `(x)`, or `(x, y)` for a word two blocks share")
+                        }
+                        let second = args.get(1).map(|y| self.expr(y));
+                        SpongeCell::Absorbed(self.expr(&args[0]), second)
+                    }
+                    _ => match self.try_const_int(w) {
+                        Some(0) => SpongeCell::Zero,
+                        _ => SpongeCell::Cell(self.expr(w)),
+                    },
                 })
                 .collect();
         }
@@ -584,7 +649,7 @@ impl FnLower<'_> {
             SpongeCell::Zero => self.keccak_pad_run() + 1,
             SpongeCell::Const(v) if v == keccak_pad_value() => self.keccak_pad_run(),
             SpongeCell::Const(v) => self.const_cell(v),
-            SpongeCell::Cell(o) => o,
+            SpongeCell::Cell(o) | SpongeCell::Absorbed(o, _) => o,
         }
     }
 
@@ -671,10 +736,22 @@ struct KeccakOut {
     copy: Option<CellRun>,
 }
 
-/// One message cell of a `keccak` block, as the lowering knows it.
+/// One message cell of a `keccak` block, as the lowering knows it: `Absorbed` is the cell a
+/// block reads in the word's place (`absorbed(x, y)`), the second for the odd block a word
+/// two blocks share begins.
 #[derive(Clone, Copy, Debug)]
 enum SpongeCell {
     Zero,
     Const(F192),
     Cell(Off),
+    Absorbed(Off, Option<Off>),
+}
+
+/// The blocks a message of `cells` takes: its first `final_len` bytes padded, or the cells
+/// zero-extended to whole blocks.
+fn keccak_blocks(cells: usize, final_len: Option<u32>) -> usize {
+    match final_len {
+        Some(len) => len as usize / RATE + 1,
+        None => (16 * cells).div_ceil(RATE),
+    }
 }

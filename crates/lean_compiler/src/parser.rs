@@ -253,6 +253,7 @@ const BUILTINS: &[&str] = &[
     "assert_gpow",
     "keccak",
     "keccak_cells",
+    "absorbed",
     "const",
     "f192",
     "hint_decompose_bits",

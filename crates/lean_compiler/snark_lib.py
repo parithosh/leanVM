@@ -258,6 +258,7 @@ def keccak_cells(
     state=None,
     len: Optional[int] = None,
     final: Optional[int] = None,
+    states=None,
 ) -> None:
     """The leanVM hash of the message `cells` holds (a StackBuf, a slice with
     compile-time bounds, a list of words, or a comprehension over `unroll`), its
@@ -266,5 +267,15 @@ def keccak_cells(
 
     `state` continues a hash from a previous 13-cell output whose message so far
     is a whole number of 17-cell block pairs. `final=0` absorbs the cells
-    zero-extended to whole blocks, with no padding."""
-    _ = cells, out, state, len, final
+    zero-extended to whole blocks, with no padding. `states`, a StackBuf run of 13
+    cells a block but the last, receives those blocks' outputs. A word of a list
+    may be `absorbed(...)`."""
+    _ = cells, out, state, len, final, states
+
+
+def absorbed(x, y=None) -> None:
+    """A word of a `keccak_cells` list its block reads as the cell `x`, which the
+    program provides as the previous output's cell XOR the word (the word itself
+    in a first block from the zero state). A word an even block ends in begins the
+    next block too, which reads `y`."""
+    _ = x, y

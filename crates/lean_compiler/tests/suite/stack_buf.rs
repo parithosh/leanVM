@@ -89,6 +89,35 @@ def main():
     proves(src, want);
 }
 
+/// `states=` names every block's output but the last's, and `absorbed(x)` hands a block the
+/// cell it reads in a word's place: the 304-byte message's last two words XORed into the
+/// state its block pair leaves, by the program, give the digest of the message itself.
+#[test]
+fn keccak_absorbed_words_and_named_states() {
+    let src = "\
+def main():
+    run = StackBuf(19)
+    for k in unroll(0, 19):
+        run[k] = const(k + 1)
+    states = StackBuf(26)
+    whole = StackBuf(2)
+    keccak_cells(run, whole, states=states)
+    st = StackBuf(13)
+    keccak_cells(run[0:17], st, final=0)
+    assert states[13] == st[0]
+    assert states[25] == st[12]
+    out = StackBuf(2)
+    keccak_cells([absorbed(st[0] + run[17]), absorbed(st[1] + run[18])], out, state=st)
+    assert out[0] == whole[0]
+    assert out[1] == whole[1]
+    p = 1
+    p[1] = out[0]
+    p[GEN] = out[1]
+    return
+";
+    proves(src, hash_cells(&scalar_cells(1..=19)));
+}
+
 /// A message on either side of a block's end, 135 and 136 bytes: the padding's last
 /// byte in lane 16 of the first block's ninth cell, or the padding a second block,
 /// odd, its first byte in that cell's high lane.

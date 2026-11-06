@@ -521,6 +521,9 @@ impl FnLower<'_> {
                 "{callee} is a statement: it writes the state or the digest into its `out` run"
             ))
         };
+        if callee == "absorbed" {
+            self.fail("absorbed(...) is a word of a keccak_cells message")
+        };
         self.inline_stack_ret = None;
         if self.defs.get(callee).is_some_and(|d| d.inline) {
             let dsts: Vec<Off> = (0..n_ret).map(|_| self.fresh()).collect();
@@ -569,6 +572,9 @@ impl FnLower<'_> {
     pub(super) fn call_into(&mut self, callee: &str, args: &[Expr], dsts: &[Off]) {
         if callee == "keccak" || callee == "keccak_cells" {
             self.fail(format!("{callee} is a statement, not a value-returning call"))
+        };
+        if callee == "absorbed" {
+            self.fail("absorbed(...) is a word of a keccak_cells message")
         };
         if !self.try_inline(callee, args, dsts) {
             if let Some(def) = self.defs.get(callee) {
