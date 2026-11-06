@@ -4,6 +4,8 @@ on:
   push:
     branches: [ "main" ]
   pull_request:
+    # `labeled`/`unlabeled` too, so that the `gate-change` label takes effect at once.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch:
 
 permissions:
@@ -43,6 +45,15 @@ jobs:
           lake env lean "$RUNNER_TEMP/axioms.lean" | tee "$RUNNER_TEMP/axioms.txt"
           grep -qF "'XmssSecurity.leanXmss_has_127_bits_of_classical_security' depends on axioms: [propext, Classical.choice, Quot.sound]" \
             "$RUNNER_TEMP/axioms.txt"
+      # The project's own compiled modules, all the proof gate job takes from this one.
+      - name: Pack the build for the proof gate
+        working-directory: formal/lean_xmss/.lake/build/lib/lean
+        run: find . -type f -name '*.olean*' -print0 | tar --null -cf "$RUNNER_TEMP/build.tar" -T -
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lean_xmss-build
+          path: ${{ runner.temp }}/build.tar
+          retention-days: 1
       - uses: actions/upload-artifact@v4
         with:
           name: lean-xmss-axioms
@@ -92,6 +103,15 @@ jobs:
           lake env lean "$RUNNER_TEMP/axioms.lean" | tee "$RUNNER_TEMP/axioms.txt"
           grep -qF "'FORS.h26_layered' depends on axioms: [propext, Classical.choice, Quot.sound]" \
             "$RUNNER_TEMP/axioms.txt"
+      # The project's own compiled modules, all the proof gate job takes from this one.
+      - name: Pack the build for the proof gate
+        working-directory: formal/lean_sphincs/.lake/build/lib/lean
+        run: find . -type f -name '*.olean*' -print0 | tar --null -cf "$RUNNER_TEMP/build.tar" -T -
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lean_sphincs-build
+          path: ${{ runner.temp }}/build.tar
+          retention-days: 1
       - name: Save the Lake build
         if: github.ref == 'refs/heads/main' && steps.lake-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -104,3 +124,153 @@ jobs:
         with:
           name: lean-sphincs-axioms
           path: ${{ runner.temp }}/axioms.txt
+
+  # The proof gate (`formal/gate`), in a job that runs none of the change's code: the build
+  # jobs above run it (`lake build` elaborates every `run_cmd`), and code that runs there can
+  # write anywhere on that runner, a trusted dependency's directory included. Here the
+  # toolchain and the pinned dependencies are installed fresh, nothing is built, and the
+  # only thing taken from the build is the project's own `.olean` files, every one of which
+  # the gate replays through the kernel. On a pull request the base revision's `formal/gate`
+  # judges the change; a change to the gate itself lands under a maintainer's `gate-change`
+  # label, which runs the change's gate and the base's beside it, the base's reported
+  # only. The change can still edit this workflow, so this file and formal/gate want
+  # CODEOWNERS review with stale approvals dismissed.
+  proof-gate:
+    needs: [lean-xmss-formalization, lean-sphincs-formalization]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - project: lean_xmss
+            headlines: XmssSecurity.leanXmss_has_127_bits_of_classical_security
+          - project: lean_sphincs
+            headlines: FORS.h26_layered FORS.Completeness.correct FORS.Configurations.size_h26_layered_k24 FORS.Configurations.keccak256_h26_layered_k24
+    steps:
+      - uses: actions/checkout@v4
+      - name: Choose the proof gate
+        env:
+          GATE_CHANGE: ${{ contains(github.event.pull_request.labels.*.name, 'gate-change') }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          # A pull request is judged against its base, and so is a run dispatched on any
+          # branch other than main; main judges itself, its content already gated.
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            against="$BASE_REF"
+          elif [ "$GITHUB_REF" != refs/heads/main ]; then
+            against=main
+            GATE_CHANGE=false
+          else
+            against=""
+          fi
+          gate="$GITHUB_WORKSPACE/formal/gate"
+          base=""
+          if [ -n "$against" ]; then
+            git fetch --quiet --depth=1 origin "$against"
+            if git cat-file -e FETCH_HEAD:formal/gate/check.sh 2>/dev/null; then
+              mkdir -p "$RUNNER_TEMP/base"
+              git archive FETCH_HEAD formal/gate | tar -x -C "$RUNNER_TEMP/base"
+              base="$RUNNER_TEMP/base/formal/gate"
+            fi
+          fi
+          if [ -n "$base" ] && [ "$GATE_CHANGE" != true ]; then
+            gate="$base"
+            base=""
+          fi
+          echo "proof gate: $gate${base:+, and reported only: $base}"
+          echo "GATE_DIR=$gate" >> "$GITHUB_ENV"
+          echo "BASE_GATE_DIR=$base" >> "$GITHUB_ENV"
+          echo "COMPARE_BASE=$([ -n "$against" ] && [ "$GATE_CHANGE" != true ] && echo true || echo false)" >> "$GITHUB_ENV"
+      # Before anything installs it: a toolchain from elsewhere would be another kernel, and
+      # Lake runs a lakefile.lean. Lake also builds and runs what the lakefile and the
+      # manifest name (`lake exe cache get` runs a `cache` executable; a dependency's
+      # lakefile runs when Lake loads it), so on a pull request both must be the base's,
+      # unless a maintainer's `gate-change` label lets the change's own run here.
+      - name: Check the toolchain, the lakefile and the manifest
+        working-directory: formal/${{ matrix.project }}
+        run: |
+          grep -qxE 'leanprover/lean4:v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?' lean-toolchain
+          test ! -e lakefile.lean
+          if [ "$COMPARE_BASE" = true ]; then
+            for f in lakefile.toml lake-manifest.json; do
+              git show "FETCH_HEAD:formal/${{ matrix.project }}/$f" | cmp -s - "$f" ||
+                { echo "$f differs from the base revision's: a change to it needs the gate-change label" >&2; exit 1; }
+            done
+          fi
+      - uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: formal/${{ matrix.project }}
+          auto-config: false
+          build: false
+          test: false
+          lint: false
+          use-github-cache: false
+          use-mathlib-cache: true
+      # Mathlib's cache holds Mathlib and the packages it requires, not VCVio and the others;
+      # their pinned sources are built here, every module the project imports from outside
+      # itself, nothing of the project.
+      - name: Build the dependencies the cache does not hold
+        working-directory: formal/${{ matrix.project }}
+        run: |
+          # The module list is checked before Lake sees it: an empty one would make
+          # `lake build` build the project itself, running its code here.
+          python3 - > "$RUNNER_TEMP/deps.txt" <<'EOF'
+          import os, re, sys, tomllib
+          config = tomllib.load(open('lakefile.toml', 'rb'))
+          libs = config.get('lean_lib', [])
+          # The project's modules are its libraries' roots and what lies under them; a
+          # library choosing others, or an executable, would make that list incomplete.
+          if config.get('lean_exe') or any('globs' in l or 'srcDir' in l for l in libs):
+              sys.exit('lakefile.toml declares globs, srcDir or an executable: the gate takes libraries by their roots')
+          own = {r.split('.')[0] for l in libs for r in l.get('roots', [l['name']])}
+          deps = set()
+          for top, dirs, files in os.walk('.'):
+              dirs[:] = [d for d in dirs if not (top == '.' and d == '.lake')]
+              for f in files:
+                  if not f.endswith('.lean'):
+                      continue
+                  text = open(os.path.join(top, f), 'rb').read().decode('utf-8', 'replace')
+                  for m in re.findall(r'^(?:(?:public|meta|private)\s+)*import\s+(\S+)', text, re.M):
+                      root = m.split('.')[0]
+                      # The project's own modules and the toolchain's are no dependency's.
+                      if root in own or root in ('Init', 'Std', 'Lean', 'Lake'):
+                          continue
+                      if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*', m):
+                          sys.exit(f'unexpected module name {m!r} in {f}')
+                      deps.add(m)
+          if not deps:
+              sys.exit('no dependency module found')
+          print('\n'.join('+' + d for d in sorted(deps)))
+          EOF
+          mapfile -t deps < "$RUNNER_TEMP/deps.txt"
+          test "${#deps[@]}" -gt 0
+          lake build "${deps[@]}"
+          # Nothing of the project was built.
+          test ! -e .lake/build
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.project }}-build
+          path: ${{ runner.temp }}/build
+      - name: Unpack the build
+        run: |
+          out="formal/${{ matrix.project }}/.lake/build/lib/lean"
+          rm -rf "formal/${{ matrix.project }}/.lake/build"
+          mkdir -p "$out"
+          tar -x --no-same-owner --no-same-permissions -f "$RUNNER_TEMP/build/build.tar" -C "$out"
+      - name: Test the proof gate
+        run: '"$GATE_DIR/selftest.sh" formal/${{ matrix.project }}/lean-toolchain'
+      - name: Proof gate
+        run: '"$GATE_DIR/check.sh" formal/${{ matrix.project }} ${{ matrix.headlines }}'
+      - name: Base proof gate, reported only
+        if: env.BASE_GATE_DIR != ''
+        continue-on-error: true
+        run: '"$BASE_GATE_DIR/check.sh" formal/${{ matrix.project }} ${{ matrix.headlines }}'
+
+  # One required check: a skipped gate job (after a failed build) would otherwise count as
+  # passed.
+  proof-gate-result:
+    needs: [lean-xmss-formalization, lean-sphincs-formalization, proof-gate]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped') }}" = true
