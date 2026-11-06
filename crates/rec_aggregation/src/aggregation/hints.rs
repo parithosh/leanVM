@@ -18,6 +18,9 @@ pub(super) const DIGIT_GROUP: usize = 3;
 pub(super) const LX_DIGIT_GROUP: usize = 4;
 /// The guest's `LX_WINDOW`: index bits a path dispatch covers.
 pub(super) const LX_WINDOW: usize = 8;
+/// The guest's `LX_ADDR_LEVELS`: a path window's last levels, whose address types the
+/// guest reads off its constants.
+pub(super) const LX_ADDR_LEVELS: usize = 3;
 const _: () = assert!(lean_sphincs::W * lean_sphincs::V == 128 && lean_sphincs::V % DIGIT_GROUP == 1);
 const _: () = assert!(lean_xmss::W == lean_sphincs::W && !lean_xmss::V.is_multiple_of(LX_DIGIT_GROUP));
 // A leaf index is the two layers' indices, which the guest dispatches on a window at a time.
@@ -93,8 +96,9 @@ fn digit_hints(codeword: &[u8], size: usize) -> impl Iterator<Item = Vec<F192>> 
 /// The guest's `lx_constants` with the bottom digest's randomizer `rho`: `GEN ** s` for
 /// every digit sum of a group, the chain indices neither zero nor a power of two, each
 /// layer's message and leaf address cells and a chain step's at each position, the target
-/// sum and the bounds of the digit groups, the last group and the path windows in the
-/// exponent, then from `LXC_RHO` (the next cell whose place in a hashed block is not in
+/// sum, the bounds of the digit groups, the last group and the path windows in the
+/// exponent, and the node address cells of each path window's last `LX_ADDR_LEVELS`
+/// levels with the window's index bits above each, then from `LXC_RHO` (the next cell whose place in a hashed block is not in
 /// its tail) the rest of that digest's block after its 64 bytes: `rho`, its padding's
 /// first byte and zeros, the last byte and the zero capacity. Then zeros to whole 8-cell
 /// blocks of the cells but `rho`. Returns the cells and `LXC_RHO`.
@@ -120,6 +124,19 @@ pub(super) fn lean_xmss_constants(rho: F192) -> (Vec<F192>, usize) {
         lean_xmss::CHAIN_LEN.pow((lean_xmss::V % LX_DIGIT_GROUP) as u32) - 1,
     ));
     cells.push(count((1 << LX_WINDOW) - 1));
+    for w in 0..lean_xmss::LOG_LIFETIME / LX_WINDOW {
+        for above in 0..LX_ADDR_LEVELS {
+            let level = LX_WINDOW * w + LX_WINDOW - 1 - above;
+            let (layer, parent) = (level / lean_xmss::LAYER_HEIGHT, level % lean_xmss::LAYER_HEIGHT + 1);
+            cells.extend((0..1u32 << above).map(|q| {
+                address(lean_xmss::tweak(
+                    lean_xmss::TWEAK_NODE,
+                    lean_xmss::layer_hi(layer, parent as u32),
+                    q,
+                ))
+            }));
+        }
+    }
     if cells.len() % 8 >= 5 {
         cells.resize(cells.len().next_multiple_of(8), F192::ZERO);
     }

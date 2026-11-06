@@ -4,7 +4,7 @@ use super::cells::{dsl_u128, f192_literal, pack_16_bytes};
 use super::child::{MU_CAP, MU_MAX, MU_MIN, STREAM_CAP, block_groups, col_groups, merkle_cap_depth, whir_shape};
 use super::claim_pool::{ClaimSite, coord_difference, coord_kind, coord_scale, push_coord_terms, walk_claims};
 use super::deferred::RECURSION_AGG_LABEL;
-use super::hints::{DIGIT_GROUP, LX_DIGIT_GROUP, LX_WINDOW, lean_xmss_constants_digest};
+use super::hints::{DIGIT_GROUP, LX_ADDR_LEVELS, LX_DIGIT_GROUP, LX_WINDOW, lean_xmss_constants_digest};
 use super::statement::{BIG_GROUPS, CLAIM_GROUP, STATEMENT_HEADER};
 use super::{MAX_KEYS, MAX_RECURSIONS};
 use fiat_shamir::merkle::hash_to_scalars;
@@ -904,6 +904,7 @@ fn signature_placeholders(ps: &mut impl FnMut(&str, String)) {
     ps("LX_HEIGHT", lean_xmss::LAYER_HEIGHT.to_string());
     ps("LX_TOP", address(lean_xmss::tweak(0, lean_xmss::TOP, 0)));
     ps("LX_WINDOW", LX_WINDOW.to_string());
+    ps("LX_ADDR_LEVELS", LX_ADDR_LEVELS.to_string());
     ps("LX_DIGIT_GROUP", LX_DIGIT_GROUP.to_string());
     let sizes =
         (0..lean_xmss::V.div_ceil(LX_DIGIT_GROUP)).map(|p| LX_DIGIT_GROUP.min(lean_xmss::V - LX_DIGIT_GROUP * p));

@@ -426,6 +426,8 @@ LX_WINDOW = LX_WINDOW_PLACEHOLDER
 LX_LAYER_WINDOWS = LX_HEIGHT // LX_WINDOW
 LX_WINDOWS = 2 * LX_LAYER_WINDOWS
 LX_WINDOW_ARMS = 2 ** LX_WINDOW
+# A window's last LX_ADDR_LEVELS levels read their address types off `lx_constants`.
+LX_ADDR_LEVELS = LX_ADDR_LEVELS_PLACEHOLDER
 # A layer's codeword digits are dispatched LX_DIGIT_GROUP at a time, then the LX_DIGIT_TAIL left.
 LX_DIGIT_GROUP = LX_DIGIT_GROUP_PLACEHOLDER
 LX_DIGIT_GROUPS = CHAIN_LENGTH ** LX_DIGIT_GROUP
@@ -441,7 +443,9 @@ LX_N_TAGS = LX_N_TAGS_PLACEHOLDER
 # The cells a leanXMSS verification reads but no signature sets (`lx_constants`): the
 # powers GEN ** s, the carried chain indices, then each layer's message, leaf and chain
 # step address types, the top's with its flag, the target sum and the range checks'
-# bounds. At LXC_RHO, a block's m operands' place in the hash, the
+# bounds, then per path window the node address types of its last LX_ADDR_LEVELS
+# levels, with the index bits the window holds above each: the last level's one,
+# then the one before's two, and so on. At LXC_RHO, a block's m operands' place in the hash, the
 # bottom digest's randomizer, the one cell no hash covers and a signature sets, then the
 # rest of that digest's block, its padding and capacity. Zero to whole 8-cell blocks of
 # the cells but the randomizer, which hash to LXC_DIGEST.
@@ -455,7 +459,9 @@ LXC_TARGET = LXC_ADDRS + 2 * LXC_ADDR_CELLS
 LXC_DIGIT_BOUND = LXC_TARGET + 1
 LXC_TAIL_BOUND = LXC_TARGET + 2
 LXC_WINDOW_BOUND = LXC_TARGET + 3
-LXC_RHO = LXC_WINDOW_BOUND + 1 + (8 - (LXC_WINDOW_BOUND + 1) % 8) % 8 * ((LXC_WINDOW_BOUND + 1) % 8 // 5)
+LXC_PATH = LXC_WINDOW_BOUND + 1  # 2 ** LX_ADDR_LEVELS - 1 cells a window
+LXC_PATH_END = LXC_PATH + LX_WINDOWS * (2 ** LX_ADDR_LEVELS - 1)
+LXC_RHO = LXC_PATH_END + (8 - LXC_PATH_END % 8) % 8 * (LXC_PATH_END % 8 // 5)
 LXC_HASHED = (LXC_RHO + 15) // 8 * 8
 LXC_CELLS = LXC_HASHED + 1
 LXC_DIGEST_0 = LXC_DIGEST_0_PLACEHOLDER
@@ -3670,10 +3676,14 @@ def lx_levels(nodes, pp, powers, his, v: Const, w: Const, k: Const):
     # at nodes[KECCAK_STATE * v] to the 13 cells after it. A node's order against its
     # hinted sibling is k's bit, and a parent's address holds `leaf_index >> (level + 1)`:
     # his[w + 1] shifted up by what is left of the window, k's higher bits added. Nothing
-    # is above the top window.
+    # is above the top window. The address types of the window's last LX_ADDR_LEVELS
+    # levels, with k's higher bits in, are cells of `lx_constants`.
     cur = nodes[KECCAK_STATE * v]
     for r in unroll(0, LX_WINDOW):
-        tag = const(TW_NODE + ((LX_WINDOW * w + r) % LX_HEIGHT + 1) * HI_MUL + (LX_WINDOW * w + r) // LX_HEIGHT * LX_TOP + k // 2 ** (r + 1))
+        if const((r + LX_ADDR_LEVELS) // LX_WINDOW == 1):
+            tag = powers[LXC_PATH + w * (2 ** LX_ADDR_LEVELS - 1) + 2 ** (LX_WINDOW - 1 - r) - 1 + k // 2 ** (r + 1)]
+        else:
+            tag = const(TW_NODE + ((LX_WINDOW * w + r) % LX_HEIGHT + 1) * HI_MUL + (LX_WINDOW * w + r) // LX_HEIGHT * LX_TOP + k // 2 ** (r + 1))
         if const(w + 1 == LX_WINDOWS):
             at = tag
         elif const(r + 1 == LX_WINDOW):
