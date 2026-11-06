@@ -3807,6 +3807,9 @@ def verify_lean_xmss(signer):
         # The leaf and the node each window reaches, 13 cells apart; the windows' dispatches
         # back to back.
         nodes = StackBuf(KECCAK_STATE * (LX_LAYER_WINDOWS + 1))
+        if const(layer == 1):
+            # The pubkey's root, where the top path's last permutation writes its root.
+            nodes[KECCAK_STATE * LX_LAYER_WINDOWS] = signer[1]
         keccak_cells([absorbed(walks[LX_LEAF_READ + 9 * (2 * j // 17) + j - 17 * (2 * j // 17) // 2], walks[LX_LEAF_READ + 9 * (2 * j // 17) + 9]) for j in unroll(0, LX_V + 2)], nodes[0:KECCAK_STATE], states=walks[LX_LEAF_STATES:LX_WALKS])
         window_bound = lxc[LXC_WINDOW_BOUND]
         for v in unroll(0, LX_LAYER_WINDOWS):
@@ -3817,7 +3820,6 @@ def verify_lean_xmss(signer):
             else:
                 his[layer * LX_LAYER_WINDOWS + v] = match(log(windows[layer * LX_LAYER_WINDOWS + v]), range(0, LX_WINDOW_ARMS), lambda k: lx_window(nodes, pp, powers, his, v, layer * LX_LAYER_WINDOWS + v, k))
         root = nodes[KECCAK_STATE * LX_LAYER_WINDOWS]
-    assert root == signer[1]
     return
 
 
