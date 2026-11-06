@@ -440,8 +440,10 @@ LX_TAG_LOG = LX_TAG_LOG_PLACEHOLDER
 LX_N_TAGS = LX_N_TAGS_PLACEHOLDER
 # The cells a leanXMSS verification reads but no signature sets (`lx_constants`): the
 # powers GEN ** s, the carried chain indices, then the address types, the target sum
-# and the range checks' bounds, zero to a whole number of 8-cell blocks, which hash
-# to LXC_DIGEST.
+# and the range checks' bounds. At LXC_RHO, a block's m operands' place in the hash, the
+# bottom digest's randomizer, the one cell no hash covers and a signature sets, then the
+# rest of that digest's block, its padding and capacity. Zero to whole 8-cell blocks of
+# the cells but the randomizer, which hash to LXC_DIGEST.
 LXC_TAGS = LX_DIGIT_GROUP * CHAIN_STEPS + 1
 LXC_MSG = LXC_TAGS + LX_N_TAGS
 LXC_LEAF = LXC_MSG + 1
@@ -451,7 +453,9 @@ LXC_TARGET = LXC_CHAIN + CHAIN_STEPS
 LXC_DIGIT_BOUND = LXC_TARGET + 1
 LXC_TAIL_BOUND = LXC_TARGET + 2
 LXC_WINDOW_BOUND = LXC_TARGET + 3
-LXC_CELLS = (LXC_WINDOW_BOUND + 8) // 8 * 8
+LXC_RHO = LXC_WINDOW_BOUND + 1 + (8 - (LXC_WINDOW_BOUND + 1) % 8) % 8 * ((LXC_WINDOW_BOUND + 1) % 8 // 5)
+LXC_HASHED = (LXC_RHO + 15) // 8 * 8
+LXC_CELLS = LXC_HASHED + 1
 LXC_DIGEST_0 = LXC_DIGEST_0_PLACEHOLDER
 LXC_DIGEST_1 = LXC_DIGEST_1_PLACEHOLDER
 # A layer's `walks` run: the chains' slots, then the cells the one-time leaf's blocks read
@@ -3708,15 +3712,16 @@ def lx_top_window(nodes, pp, powers, his, v: Const, w: Const, k: Const):
 
 @inline
 def pin_lx_constants(lxc):
-    # The LXC_CELLS hinted cells of `lx_constants`, pinned by their hash: Keccak-256 of
-    # the first eight, then an overwrite duplex step for each eight after (`fs_perm`'s),
-    # whose output must start with LXC_DIGEST. The first permutation's capacity is the
-    # zero cells the compiler sets, so other cells with that digest are a second preimage.
+    # The LXC_HASHED hinted cells of `lx_constants` around the randomizer, cell h at
+    # h + h // LXC_RHO, pinned by their hash: Keccak-256 of the first eight, then an
+    # overwrite duplex step for each eight after (`fs_perm`'s), whose output must start
+    # with LXC_DIGEST. The first permutation's capacity is the zero cells the compiler
+    # sets, so other cells with that digest are a second preimage.
     st = StackBuf(KECCAK_STATE)
     keccak(lxc[0:2], lxc[2:4], st, tail=lxc[4:8])
-    for b in unroll(1, LXC_CELLS // 8 - 1):
+    for b in unroll(1, LXC_HASHED // 8 - 1):
         nxt = StackBuf(KECCAK_STATE)
-        keccak(lxc[8 * b:8 * b + 2], lxc[8 * b + 2:8 * b + 4], nxt, tail=lxc[8 * b + 4:8 * b + 8], cap=st)
+        keccak([lxc[8 * b + 8 * b // LXC_RHO], lxc[8 * b + 1 + (8 * b + 1) // LXC_RHO]], [lxc[8 * b + 2 + (8 * b + 2) // LXC_RHO], lxc[8 * b + 3 + (8 * b + 3) // LXC_RHO]], nxt, tail=lxc[8 * b + 4 + (8 * b + 4) // LXC_RHO:8 * b + 8 + (8 * b + 4) // LXC_RHO], cap=st)
         st = nxt
     pinned = [LXC_DIGEST_0, LXC_DIGEST_1]
     keccak(lxc[LXC_CELLS - 8:LXC_CELLS - 6], lxc[LXC_CELLS - 6:LXC_CELLS - 4], pinned, tail=lxc[LXC_CELLS - 4:LXC_CELLS], cap=st)
@@ -3755,13 +3760,13 @@ def verify_lean_xmss(signer):
             idx = his[0]
         else:
             idx = his[LX_LAYER_WINDOWS] + lxc[LXC_TOP]
-        # D = Th(P, A, M | R), one block: 80 bytes at the bottom, and 64 at the top,
-        # where M is the bottom root.
-        rho = hint_witness("randomizer")
+        # D = Th(P, A, M | R), one block: 80 bytes at the bottom, R and its padding read
+        # off `lx_constants` as a whole block, and 64 at the top, where M is the bottom root.
         digest = StackBuf(KECCAK_STATE)
         if const(layer == 0):
-            keccak([pp, idx + lxc[LXC_MSG]], [signer[GEN ** 2], signer[GEN ** 3]], digest, tail=[rho, 0, 0, 0], len=80)
+            keccak([pp, idx + lxc[LXC_MSG]], [signer[GEN ** 2], signer[GEN ** 3]], digest, tail=lxc[LXC_RHO:LXC_RHO + 4], cap=lxc[LXC_RHO + 4:LXC_RHO + 9])
         else:
+            rho = hint_witness("randomizer")
             keccak([pp, idx + lxc[LXC_MSG]], [root, rho], digest)
 
         # The codeword: LX_DIGIT_GROUP digits at a time, hinted in the exponent, range

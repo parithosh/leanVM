@@ -90,12 +90,15 @@ fn digit_hints(codeword: &[u8], size: usize) -> impl Iterator<Item = Vec<F192>> 
     })
 }
 
-/// The guest's `lx_constants`: `GEN ** s` for every digit sum of a group, the chain
-/// indices neither zero nor a power of two, the message, leaf and top-layer address
-/// cells, a chain step's at each position, the target sum and the bounds of the digit
-/// groups, the last group and the path windows in the exponent, then zeros to a whole
-/// number of 8-cell blocks.
-pub(super) fn lean_xmss_constants() -> Vec<F192> {
+/// The guest's `lx_constants` with the bottom digest's randomizer `rho`: `GEN ** s` for
+/// every digit sum of a group, the chain indices neither zero nor a power of two, the
+/// message, leaf and top-layer address cells, a chain step's at each position, the target
+/// sum and the bounds of the digit groups, the last group and the path windows in the
+/// exponent, then from `LXC_RHO` (the next cell whose place in a hashed block is not in
+/// its tail) the rest of that digest's block after its 64 bytes: `rho`, its padding's
+/// first byte and zeros, the last byte and the zero capacity. Then zeros to whole 8-cell
+/// blocks of the cells but `rho`. Returns the cells and `LXC_RHO`.
+pub(super) fn lean_xmss_constants(rho: F192) -> (Vec<F192>, usize) {
     let address = |tw| pack_16_bytes(&lean_xmss::address(&tw));
     let mut cells: Vec<F192> = (0..=LX_DIGIT_GROUP * (lean_xmss::CHAIN_LEN - 1)).map(count).collect();
     cells.extend(
@@ -114,15 +117,24 @@ pub(super) fn lean_xmss_constants() -> Vec<F192> {
         lean_xmss::CHAIN_LEN.pow((lean_xmss::V % LX_DIGIT_GROUP) as u32) - 1,
     ));
     cells.push(count((1 << LX_WINDOW) - 1));
-    cells.resize(cells.len().div_ceil(8) * 8, F192::ZERO);
-    cells
+    if cells.len() % 8 >= 5 {
+        cells.resize(cells.len().next_multiple_of(8), F192::ZERO);
+    }
+    let at = cells.len();
+    let pad_first = F192::new(u64::from(primitives::hash::PAD_FIRST), 0, 0);
+    let pad_last = F192::new(u64::from(primitives::hash::PAD_LAST) << 56, 0, 0);
+    cells.extend([rho, pad_first, F192::ZERO, F192::ZERO, pad_last]);
+    cells.extend([F192::ZERO; 4]);
+    cells.resize((cells.len() - 1).next_multiple_of(8) + 1, F192::ZERO);
+    (cells, at)
 }
 
 /// The digest `pin_lx_constants` checks [`lean_xmss_constants`] against: Keccak-256 of
-/// the first eight cells, then an overwrite duplex step for each eight after, the first
-/// two cells of the last output.
+/// the first eight cells but the randomizer, then an overwrite duplex step for each eight
+/// after, the first two cells of the last output.
 pub(super) fn lean_xmss_constants_digest() -> [F192; 2] {
-    let cells = lean_xmss_constants();
+    let (mut cells, rho) = lean_xmss_constants(F192::ZERO);
+    cells.remove(rho);
     let mut state = [0u64; 25];
     for (b, block) in cells.chunks(8).enumerate() {
         for (c, cell) in block.iter().enumerate() {
@@ -193,7 +205,10 @@ pub(super) fn lean_xmss_hints(
             "lx_windows",
             windows.map(|x| count((x % (1 << LX_WINDOW)) as usize)).collect(),
         ),
-        ("lx_constants", lean_xmss_constants()),
+        (
+            "lx_constants",
+            lean_xmss_constants(pack_16_bytes(sig.bottom().randomizer())).0,
+        ),
     ];
     let mut root: Vec<u8> = message.to_vec();
     let mut level = 0;
@@ -207,7 +222,9 @@ pub(super) fn lean_xmss_hints(
             level += 1;
         })
         .ok_or(AggregationError::MalformedRawSignature)?;
-        hints.push(("randomizer", vec![pack_16_bytes(layer_sig.randomizer())]));
+        if layer == 1 {
+            hints.push(("randomizer", vec![pack_16_bytes(layer_sig.randomizer())]));
+        }
         // The one-time leaf's words, whose blocks' reads the guest takes as advice. A chain
         // the codeword leaves no step of needs no start: its tip is that value.
         let mut words = vec![
