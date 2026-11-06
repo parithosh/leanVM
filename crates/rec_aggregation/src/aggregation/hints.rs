@@ -90,6 +90,52 @@ fn digit_hints(codeword: &[u8], size: usize) -> impl Iterator<Item = Vec<F192>> 
     })
 }
 
+/// The guest's `lx_constants`: `GEN ** s` for every digit sum of a group, the chain
+/// indices neither zero nor a power of two, the message, leaf and top-layer address
+/// cells, a chain step's at each position, the target sum and the bounds of the digit
+/// groups, the last group and the path windows in the exponent, then zeros to a whole
+/// number of 8-cell blocks.
+pub(super) fn lean_xmss_constants() -> Vec<F192> {
+    let address = |tw| pack_16_bytes(&lean_xmss::address(&tw));
+    let mut cells: Vec<F192> = (0..=LX_DIGIT_GROUP * (lean_xmss::CHAIN_LEN - 1)).map(count).collect();
+    cells.extend(
+        (1..lean_xmss::V)
+            .filter(|i| !i.is_power_of_two())
+            .map(|i| F192::new(i as u64, 0, 0)),
+    );
+    cells.push(address(lean_xmss::tweak(lean_xmss::TWEAK_MSG, 0, 0)));
+    cells.push(address(lean_xmss::tweak(lean_xmss::TWEAK_LEAF, 0, 0)));
+    cells.push(address(lean_xmss::tweak(0, lean_xmss::TOP, 0)));
+    cells
+        .extend((0..lean_xmss::CHAIN_LEN - 1).map(|s| address(lean_xmss::tweak(lean_xmss::TWEAK_CHAIN, 0, 0).step(s))));
+    cells.push(count(lean_xmss::TARGET_SUM));
+    cells.push(count(lean_xmss::CHAIN_LEN.pow(LX_DIGIT_GROUP as u32) - 1));
+    cells.push(count(
+        lean_xmss::CHAIN_LEN.pow((lean_xmss::V % LX_DIGIT_GROUP) as u32) - 1,
+    ));
+    cells.push(count((1 << LX_WINDOW) - 1));
+    cells.resize(cells.len().div_ceil(8) * 8, F192::ZERO);
+    cells
+}
+
+/// The digest `pin_lx_constants` checks [`lean_xmss_constants`] against: Keccak-256 of
+/// the first eight cells, then an overwrite duplex step for each eight after, the first
+/// two cells of the last output.
+pub(super) fn lean_xmss_constants_digest() -> [F192; 2] {
+    let cells = lean_xmss_constants();
+    let mut state = [0u64; 25];
+    for (b, block) in cells.chunks(8).enumerate() {
+        for (c, cell) in block.iter().enumerate() {
+            [state[2 * c], state[2 * c + 1]] = [cell.c0, cell.c1];
+        }
+        if b == 0 {
+            state[16] = u64::from(primitives::hash::PAD_FIRST) | u64::from(primitives::hash::PAD_LAST) << 56;
+        }
+        primitives::hash::keccak_f(&mut state);
+    }
+    [F192::new(state[0], state[1], 0), F192::new(state[2], state[3], 0)]
+}
+
 /// One leanXMSS signature's witness: its leaf index shifted by each multiple of
 /// `LX_WINDOW` and those windows in the exponent, then per layer, bottom first, the
 /// randomizer, the codeword's digits, the chain values they start from, and the
@@ -108,6 +154,7 @@ pub(super) fn lean_xmss_hints(
             "lx_windows",
             windows.map(|x| count((x % (1 << LX_WINDOW)) as usize)).collect(),
         ),
+        ("lx_constants", lean_xmss_constants()),
     ];
     let mut root: Vec<u8> = message.to_vec();
     let mut level = 0;

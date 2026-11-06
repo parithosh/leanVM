@@ -4,7 +4,7 @@ use super::cells::{dsl_u128, f192_literal, pack_16_bytes};
 use super::child::{MU_CAP, MU_MAX, MU_MIN, STREAM_CAP, block_groups, col_groups, merkle_cap_depth, whir_shape};
 use super::claim_pool::{ClaimSite, coord_difference, coord_kind, coord_scale, push_coord_terms, walk_claims};
 use super::deferred::RECURSION_AGG_LABEL;
-use super::hints::{DIGIT_GROUP, LX_DIGIT_GROUP, LX_WINDOW};
+use super::hints::{DIGIT_GROUP, LX_DIGIT_GROUP, LX_WINDOW, lean_xmss_constants_digest};
 use super::statement::{BIG_GROUPS, CLAIM_GROUP, STATEMENT_HEADER};
 use super::{MAX_KEYS, MAX_RECURSIONS};
 use fiat_shamir::merkle::hash_to_scalars;
@@ -920,6 +920,9 @@ fn signature_placeholders(ps: &mut impl FnMut(&str, String)) {
     ps("LX_TAG_SLOT", format!("{slots:?}"));
     ps("LX_TAG_LOG", format!("{logs:?}"));
     ps("LX_N_TAGS", n_tags.to_string());
+    let [d0, d1] = lean_xmss_constants_digest();
+    ps("LXC_DIGEST_0", dsl_u128(d0).to_string());
+    ps("LXC_DIGEST_1", dsl_u128(d1).to_string());
     ps("MAX_KEYS", MAX_KEYS.to_string());
     ps("CLAIM_GROUP", CLAIM_GROUP.to_string());
     ps("BIG_GROUPS", BIG_GROUPS.to_string());
