@@ -1,6 +1,6 @@
 //! Hint streams and the raw signatures' witnesses.
 
-use super::cells::{count, exponent_bytes, pack_16_bytes};
+use super::cells::{cell_bytes, count, exponent_bytes, pack_16_bytes};
 use super::error::AggregationError;
 use leanvm_core::cpu::Program;
 use primitives::field::F192;
@@ -136,6 +136,45 @@ pub(super) fn lean_xmss_constants_digest() -> [F192; 2] {
     [F192::new(state[0], state[1], 0), F192::new(state[2], state[3], 0)]
 }
 
+/// The cells the `KECCAK` blocks of a hash of `words` read, nine a block, block `k`'s at
+/// `9k`: the previous output's cell XOR the message cell (the cell itself in the first
+/// block), zero past the words. The guest's `lx_leaf` but its first two.
+fn absorbed_reads(words: &[F192]) -> Vec<F192> {
+    use leanvm_core::keccak::{RATE_CELLS, STATE_CELLS, cell_lanes};
+    let blocks = 16 * words.len() / primitives::hash::RATE + 1;
+    let mut bytes = cell_bytes(words.iter().copied());
+    bytes.resize(blocks * primitives::hash::RATE + 16, 0);
+    bytes[16 * words.len()] ^= primitives::hash::PAD_FIRST;
+    bytes[blocks * primitives::hash::RATE - 1] ^= primitives::hash::PAD_LAST;
+    let mut reads = vec![F192::ZERO; RATE_CELLS * blocks];
+    let mut state = [F192::ZERO; STATE_CELLS];
+    for k in 0..blocks {
+        let (odd, first) = (k % 2 == 1, 17 * k / 2);
+        let mut lanes = [0u64; 25];
+        for (c, (lo, hi)) in cell_lanes(odd).into_iter().enumerate() {
+            let mut cell = state[c];
+            if c < RATE_CELLS {
+                cell += pack_16_bytes(&bytes[16 * (first + c)..]);
+                if first + c < words.len() {
+                    reads[RATE_CELLS * k + c] = cell;
+                }
+            }
+            if let Some(l) = lo {
+                lanes[l] = cell.c0;
+            }
+            if let Some(h) = hi {
+                lanes[h] = cell.c1;
+            }
+        }
+        primitives::hash::keccak_f(&mut lanes);
+        state = std::array::from_fn(|c| {
+            let (lo, hi) = cell_lanes(k % 2 == 0)[c];
+            F192::new(lo.map_or(0, |l| lanes[l]), hi.map_or(0, |h| lanes[h]), 0)
+        });
+    }
+    reads
+}
+
 /// One leanXMSS signature's witness: its leaf index shifted by each multiple of
 /// `LX_WINDOW` and those windows in the exponent, then per layer, bottom first, the
 /// randomizer, the codeword's digits, the chain values they start from, and the
@@ -169,9 +208,34 @@ pub(super) fn lean_xmss_hints(
         })
         .ok_or(AggregationError::MalformedRawSignature)?;
         hints.push(("randomizer", vec![pack_16_bytes(layer_sig.randomizer())]));
+        // The one-time leaf's words, whose blocks' reads the guest takes as advice. A chain
+        // the codeword leaves no step of needs no start: its tip is that value.
+        let mut words = vec![
+            pack_16_bytes(pp),
+            pack_16_bytes(&lean_xmss::address(&lean_xmss::tweak(
+                lean_xmss::TWEAK_LEAF,
+                lean_xmss::layer_hi(layer, 0),
+                e,
+            ))),
+        ];
+        for (i, (&x, value)) in codeword.iter().zip(layer_sig.chain_values()).enumerate() {
+            let steps = lean_xmss::CHAIN_LEN - 1 - usize::from(x);
+            words.push(pack_16_bytes(&lean_xmss::chain(
+                pp,
+                layer,
+                e,
+                i,
+                x.into(),
+                steps,
+                *value,
+            )));
+        }
+        hints.push(("lx_leaf", absorbed_reads(&words)[2..].to_vec()));
         hints.push(("lx_digits", digit_hints(&codeword, LX_DIGIT_GROUP).flatten().collect()));
-        for value in layer_sig.chain_values() {
-            hints.push(("chain_starts", vec![pack_16_bytes(value)]));
+        for (&x, value) in codeword.iter().zip(layer_sig.chain_values()) {
+            if usize::from(x) < lean_xmss::CHAIN_LEN - 1 {
+                hints.push(("chain_starts", vec![pack_16_bytes(value)]));
+            }
         }
         root = reached.to_vec();
     }

@@ -454,6 +454,13 @@ LXC_WINDOW_BOUND = LXC_TARGET + 3
 LXC_CELLS = (LXC_WINDOW_BOUND + 8) // 8 * 8
 LXC_DIGEST_0 = LXC_DIGEST_0_PLACEHOLDER
 LXC_DIGEST_1 = LXC_DIGEST_1_PLACEHOLDER
+# A layer's `walks` run: the chains' slots, then the cells the one-time leaf's blocks read
+# (`lx_leaf`), nine a block, the block of word j being 2j // 17, then the outputs of all
+# its blocks but the last.
+LX_LEAF_BLOCKS = 16 * (LX_V + 2) // 136 + 1
+LX_LEAF_READ = LX_V * CHAIN_STEPS * KECCAK_STATE
+LX_LEAF_STATES = LX_LEAF_READ + 9 * LX_LEAF_BLOCKS
+LX_WALKS = LX_LEAF_STATES + KECCAK_STATE * (LX_LEAF_BLOCKS - 1)
 
 # -------------------------------------------------- leanSPHINCS (host-supplied)
 # The scheme's own letters, prefixed SP_: under each bottom leaf a FORS instance of
@@ -3538,7 +3545,8 @@ def verify_sub(pi_0, pi_1, seed_0, seed_1, g_squares, defer_out):
 # one cell: a hash's output feeds the next hash where it lands, and a hinted value
 # needs no check of its own, the KECCAK table reading only canonical cells. A chain's
 # steps land in fixed slots of a `walks` run, so its tip is one cell whatever the
-# digit, read there by the leaf's hash.
+# digit, read there by a leanSPHINCS leaf's hash and pinned there by leanXMSS's
+# (`lx_leaf_pin`).
 
 
 @inline
@@ -3576,7 +3584,8 @@ def walk(at, pp, walks, tags, powers, i: Const, k: Const, lx: Const):
         else:
             tag = tags[LXC_TAGS + LX_TAG_SLOT[i] - 1]
     if const(k == CHAIN_STEPS):
-        hint_witness(walks[((i + 1) * CHAIN_STEPS - 1) * KECCAK_STATE:((i + 1) * CHAIN_STEPS - 1) * KECCAK_STATE + 1], "chain_starts")
+        if const(lx == 0):
+            hint_witness(walks[((i + 1) * CHAIN_STEPS - 1) * KECCAK_STATE:((i + 1) * CHAIN_STEPS - 1) * KECCAK_STATE + 1], "chain_starts")
     else:
         value = hint_witness("chain_starts")
         for s in unroll(k, CHAIN_STEPS):
@@ -3586,6 +3595,26 @@ def walk(at, pp, walks, tags, powers, i: Const, k: Const, lx: Const):
             else:
                 keccak([pp, at + const(TW_CHAIN + i * HI_MUL + s * STEP_MUL)], [value, 0], walks[o:o + KECCAK_STATE], len=48)
             value = walks[o]
+        if const(lx == 1):
+            lx_leaf_pin(walks, value, 2 * (i + 2) // 17, i + 2 - 17 * (2 * (i + 2) // 17) // 2)
+    return
+
+
+@inline
+def lx_leaf_pin(walks, tip, b: Const, p: Const):
+    # The tip of a walked chain is the word at cell p of a leanXMSS one-time leaf's block
+    # b: the cells the blocks read in its place (`lx_leaf`) are pinned to it. From the
+    # zero state the cell is the word, and after it the previous output's cell XOR the
+    # word, stored where that output is. The cell an even block ends in is the next
+    # block's first too. An unwalked chain's tip is its signature's value, which no step
+    # checks, so the cells it is read in stay as hinted.
+    if const(b == 0):
+        walks[LX_LEAF_READ + p] = tip
+    else:
+        walks[LX_LEAF_STATES + KECCAK_STATE * (b - 1) + p] = walks[LX_LEAF_READ + 9 * b + p] + tip
+    if const(b % 2 == 0):
+        if const(p == 8):
+            walks[LX_LEAF_STATES + KECCAK_STATE * b] = walks[LX_LEAF_READ + 9 * b + 9] + tip
     return
 
 
@@ -3727,9 +3756,10 @@ def verify_lean_xmss(signer):
         steps = StackBuf(CHAIN_STEPS)
         for st in unroll(0, CHAIN_STEPS):
             steps[st] = idx + lxc[LXC_CHAIN + st]
-        walks = StackBuf(LX_V * CHAIN_STEPS * KECCAK_STATE)
+        walks = StackBuf(LX_WALKS)
         digit_product = 1
         encoded = 0
+        hint_witness(walks[LX_LEAF_READ + 2:LX_LEAF_STATES], "lx_leaf")
         groups = StackBuf(LX_DIGIT_DISPATCHES)
         hint_witness(groups, "lx_digits")
         digit_bound = lxc[LXC_DIGIT_BOUND]
@@ -3744,9 +3774,12 @@ def verify_lean_xmss(signer):
         digest[0] = encoded  # the digits, stored where D already is
         assert digit_product == lxc[LXC_TARGET]
 
-        # The one-time leaf, then the path to the layer's root, a window at a time.
+        # The one-time leaf, then the path to the layer's root, a window at a time. Its
+        # blocks read the cells of `lx_leaf`, which the walks pinned to their tips.
+        walks[LX_LEAF_READ] = pp
+        walks[LX_LEAF_READ + 1] = idx + lxc[LXC_LEAF]
         leaf = StackBuf(KECCAK_STATE)
-        wots_leaf(pp, idx + lxc[LXC_LEAF], walks, LX_V, leaf)
+        keccak_cells([absorbed(walks[LX_LEAF_READ + 9 * (2 * j // 17) + j - 17 * (2 * j // 17) // 2], walks[LX_LEAF_READ + 9 * (2 * j // 17) + 9]) for j in unroll(0, LX_V + 2)], leaf, states=walks[LX_LEAF_STATES:LX_WALKS])
         cur = leaf[0]
         for v in unroll(0, LX_LAYER_WINDOWS):
             w = layer * LX_LAYER_WINDOWS + v
