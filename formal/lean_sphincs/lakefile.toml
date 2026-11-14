@@ -1,6 +1,6 @@
 name = "lean-sphincs-security"
 version = "0.1.0"
-defaultTargets = ["Sphincs", "FORS"]
+defaultTargets = ["Sphincs", "FORS", "Sphincs.Tests.NonVacuity"]
 
 [leanOptions]
 warningAsError = true
